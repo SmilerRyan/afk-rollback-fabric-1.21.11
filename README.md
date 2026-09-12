@@ -1,4 +1,4 @@
-AFK Rollback v1.1.5
+AFK Rollback v1.1.0
 
 Rollback now waits for the integrated server to fully shut down and for Minecraft to release the world before replacing the world folder. This avoids level.dat save/rename races during rollback.
 
