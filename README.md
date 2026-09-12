@@ -14,9 +14,21 @@ The checkpoint is stored inside the world at:
 saves/<world>/checkpoint/
 ```
 
-Only one checkpoint exists at a time. Saving a new checkpoint replaces the old one only after the new copy has finished successfully. Restoring a checkpoint never deletes it.
+A checkpoint is literally a copy of the whole world folder into a folder called checkpoint in the world's folder.
+
+Only one checkpoint can exist per world at a time.
+
+Saving a new checkpoint replaces the old one only after the new copy has finished successfully.
+Restoring a checkpoint never deletes it.
 
 When a checkpoint exists, the death screen shows its age, for example:
+
+You can delete the checkpoint folder if you do not want to keep the checkpoint.
+
+If you want to manually restore a world without the mod:
+ - Delete every file except for the checkpoint folder
+ - Move all the files out of the checkpoint folder
+ - Delete the empty checkpoint folder
 
 ```text
 Roll back to 2h 14m 37s ago
