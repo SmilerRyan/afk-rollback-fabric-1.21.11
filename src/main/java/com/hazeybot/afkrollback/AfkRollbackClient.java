@@ -62,7 +62,6 @@ public final class AfkRollbackClient implements ClientModInitializer {
     private static boolean checkpointSaveInProgress;
     private static boolean saveWasDown;
     private static boolean loadWasDown;
-    private static RollbackTransitionScreen rollbackTransitionScreen;
 
     @Override
     public void onInitializeClient() {
@@ -77,15 +76,11 @@ public final class AfkRollbackClient implements ClientModInitializer {
         }
 
         if (checkpointRestoreStarted) {
-            // Keep our own transition screen above Minecraft's normal saving/loading
-            // screens until the new integrated server and client world are ready.
+            // Leave the title panorama visible until the restored world is ready.
             if (client.level != null && client.hasSingleplayerServer()) {
                 checkpointRestoreStarted = false;
                 seamlessRollback = false;
-                rollbackTransitionScreen = null;
                 client.setScreen(null);
-            } else {
-                keepRollbackTransitionVisible(client);
             }
             return;
         }
@@ -182,10 +177,6 @@ public final class AfkRollbackClient implements ClientModInitializer {
         return seamlessRollback;
     }
 
-    public static boolean isRollbackTransitionScreen(Screen screen) {
-        return screen != null && screen == rollbackTransitionScreen;
-    }
-
     public static boolean hasCheckpoint() {
         Minecraft client = Minecraft.getInstance();
         IntegratedServer server = client.getSingleplayerServer();
@@ -250,8 +241,9 @@ public final class AfkRollbackClient implements ClientModInitializer {
             checkpointRestoreShutdownRequested = false;
             checkpointRestoreDisconnectRequested = false;
             seamlessRollback = true;
-            rollbackTransitionScreen = new RollbackTransitionScreen();
-            client.setScreen(rollbackTransitionScreen);
+            // Show only the normal Minecraft panorama immediately.
+            // This avoids both the title-screen fade and the title/menu UI.
+            client.setScreen(new PanoramaScreen());
             LOGGER.info("Checkpoint restore requested for world {}", pendingCheckpointWorld);
         } catch (Exception e) {
             LOGGER.error("Could not start checkpoint restore", e);
@@ -280,14 +272,12 @@ public final class AfkRollbackClient implements ClientModInitializer {
                 // Detach the client world without opening the normal disconnect/title screen.
                 // WorldOpenFlows below will create a fresh integrated server and reconnect us.
                 client.disconnectFromWorld(Component.literal("Rollback"));
-                keepRollbackTransitionVisible(client);
             }
             return;
         }
 
         checkpointRestoreStarted = true;
         seamlessRollback = true;
-        keepRollbackTransitionVisible(client);
         String worldName = pendingCheckpointWorld;
         pendingCheckpointWorld = null;
         checkpointRestoreShutdownRequested = false;
@@ -322,42 +312,6 @@ public final class AfkRollbackClient implements ClientModInitializer {
             seamlessRollback = false;
             checkpointRestoreStarted = false;
             client.setScreen(null);
-        }
-    }
-
-    private static void keepRollbackTransitionVisible(Minecraft client) {
-        if (rollbackTransitionScreen == null) {
-            rollbackTransitionScreen = new RollbackTransitionScreen();
-        }
-        if (client.screen != rollbackTransitionScreen) {
-            client.setScreen(rollbackTransitionScreen);
-        }
-    }
-
-    private static final class RollbackTransitionScreen extends Screen {
-        private RollbackTransitionScreen() {
-            super(Component.literal("Rolling back"));
-        }
-
-        @Override
-        public boolean isPauseScreen() {
-            return false;
-        }
-
-        @Override
-        public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
-            // Do not call Screen.render(): leave the current game frame visible and
-            // simply put a dark, portal-like transition over it. This screen remains
-            // in place while Minecraft performs its normal server/world transition.
-            graphics.fill(0, 0, this.width, this.height, 0x99000000);
-            Component text = Component.literal("Rolling back...");
-            int textWidth = this.font.width(text);
-            graphics.drawString(this.font, text, (this.width - textWidth) / 2, this.height / 2, 0xFFFFFFFF, true);
-        }
-
-        @Override
-        public boolean shouldCloseOnEsc() {
-            return false;
         }
     }
 

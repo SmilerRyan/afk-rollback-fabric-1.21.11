@@ -3,6 +3,7 @@ package com.hazeybot.afkrollback.mixin;
 import com.hazeybot.afkrollback.AfkRollbackClient;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
+import com.hazeybot.afkrollback.PanoramaScreen;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -14,7 +15,7 @@ public abstract class MinecraftTransitionMixin {
     private void onSetScreen(Screen screen, CallbackInfo ci) {
         if (AfkRollbackClient.isSeamlessRollback()
                 && screen != null
-                && !AfkRollbackClient.isRollbackTransitionScreen(screen)) {
+                && !(screen instanceof PanoramaScreen)) {
             ci.cancel();
         }
     }
