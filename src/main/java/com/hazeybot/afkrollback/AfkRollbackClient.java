@@ -95,6 +95,9 @@ public final class AfkRollbackClient implements ClientModInitializer {
             lastY = y;
             lastZ = z;
             haveLastPosition = true;
+            if (haveLastPosition) {
+                LOGGER.info("Player moved; starting a new AFK idle period.");
+            }
             stillTicks = 0;
             snapshotThisIdlePeriod = false;
             return;
@@ -103,6 +106,7 @@ public final class AfkRollbackClient implements ClientModInitializer {
         stillTicks++;
         if (!snapshotThisIdlePeriod && stillTicks >= afkTicks) {
             snapshotThisIdlePeriod = true;
+            LOGGER.info("AFK threshold reached; creating rolling snapshot.");
             createSnapshot(client);
         }
     }
@@ -184,8 +188,8 @@ public final class AfkRollbackClient implements ClientModInitializer {
             Path world = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
             Path saves = world.getParent();
             if (saves == null) return false;
-            Path snapshot = saves.resolve(world.getFileName().toString() + "-afk").normalize();
-            return snapshot.startsWith(saves) && Files.isDirectory(snapshot) && Files.exists(snapshot.resolve("level.dat"));
+            Path snapshot = world.resolve(SNAPSHOT_DIR).normalize();
+            return snapshot.startsWith(world) && Files.isDirectory(snapshot) && Files.exists(snapshot.resolve("level.dat"));
         } catch (Exception e) {
             return false;
         }
