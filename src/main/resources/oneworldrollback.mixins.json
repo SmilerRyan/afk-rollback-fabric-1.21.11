@@ -4,7 +4,8 @@
   "compatibilityLevel": "JAVA_21",
   "client": [
     "ScreenInvoker",
-    "DeathScreenMixin"
+    "DeathScreenMixin",
+    "MinecraftTransitionMixin"
   ],
   "injectors": {
     "defaultRequire": 1

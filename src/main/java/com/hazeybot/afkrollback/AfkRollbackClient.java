@@ -182,6 +182,10 @@ public final class AfkRollbackClient implements ClientModInitializer {
         return seamlessRollback;
     }
 
+    public static boolean isRollbackTransitionScreen(Screen screen) {
+        return screen != null && screen == rollbackTransitionScreen;
+    }
+
     public static boolean hasCheckpoint() {
         Minecraft client = Minecraft.getInstance();
         IntegratedServer server = client.getSingleplayerServer();
