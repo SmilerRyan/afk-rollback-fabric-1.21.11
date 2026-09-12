@@ -91,7 +91,7 @@ public final class AfkRollbackClient implements ClientModInitializer {
     }
 
     private static boolean hasShiftDown(Minecraft client) {
-        long window = client.getWindow().getWindow();
+        long window = client.getWindow().getHandle();
         return GLFW.glfwGetKey(window, GLFW.GLFW_KEY_LEFT_SHIFT) == GLFW.GLFW_PRESS
                 || GLFW.glfwGetKey(window, GLFW.GLFW_KEY_RIGHT_SHIFT) == GLFW.GLFW_PRESS;
     }
