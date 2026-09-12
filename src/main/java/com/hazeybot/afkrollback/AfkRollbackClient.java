@@ -34,6 +34,7 @@ public final class AfkRollbackClient implements ClientModInitializer {
     private static boolean haveLastPosition;
     private static long stillTicks;
     private static boolean snapshotThisIdlePeriod;
+    private static boolean wasMoving;
 
     private static String pendingRollbackWorld;
     private static boolean rollbackStarted;
@@ -95,12 +96,18 @@ public final class AfkRollbackClient implements ClientModInitializer {
             lastY = y;
             lastZ = z;
             haveLastPosition = true;
-            if (haveLastPosition) {
+            if (!wasMoving) {
                 LOGGER.info("Player moved; starting a new AFK idle period.");
             }
+            wasMoving = true;
             stillTicks = 0;
             snapshotThisIdlePeriod = false;
             return;
+        }
+
+        if (wasMoving) {
+            LOGGER.info("Player stopped moving; AFK timer started.");
+            wasMoving = false;
         }
 
         stillTicks++;
@@ -115,6 +122,7 @@ public final class AfkRollbackClient implements ClientModInitializer {
         haveLastPosition = false;
         stillTicks = 0;
         snapshotThisIdlePeriod = false;
+        wasMoving = false;
     }
 
     private static void createSnapshot(Minecraft client) {
@@ -249,10 +257,10 @@ public final class AfkRollbackClient implements ClientModInitializer {
 
         Path saves = client.getLevelSource().getBaseDir().toAbsolutePath().normalize();
         Path world = saves.resolve(worldName).normalize();
-        Path snapshot = saves.resolve(worldName + "-afk").normalize();
+        Path snapshot = world.resolve(SNAPSHOT_DIR).normalize();
 
         try {
-            if (!world.startsWith(saves) || !snapshot.startsWith(saves)) {
+            if (!world.startsWith(saves) || !snapshot.startsWith(world)) {
                 throw new IOException("Unsafe world path");
             }
             if (!Files.isDirectory(snapshot) || !Files.exists(snapshot.resolve("level.dat"))) {
