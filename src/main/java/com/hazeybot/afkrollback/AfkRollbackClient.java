@@ -1,308 +1,272 @@
 package com.hazeybot.afkrollback;
 
+import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.network.chat.Component;
-import net.minecraft.world.entity.player.Player;
+import net.minecraft.resources.Identifier;
 import net.minecraft.world.level.storage.LevelResource;
+import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.util.Properties;
 
 public final class AfkRollbackClient implements ClientModInitializer {
     public static final String MOD_ID = "afk-rollback";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
-    private static final long DEFAULT_AFK_SECONDS = 10;
-    private static long afkTicks = 20 * DEFAULT_AFK_SECONDS;
+    private static final String CHECKPOINT_DIR = "checkpoint";
+    private static final String CHECKPOINT_TEMP_DIR = "checkpoint.tmp";
 
-    private static double lastX;
-    private static double lastY;
-    private static double lastZ;
-    private static boolean haveLastPosition;
-    private static long stillTicks;
-    private static long stillStartMillis;
-    private static boolean snapshotThisIdlePeriod;
-    private static boolean wasMoving;
+    private static final KeyMapping.Category CHECKPOINT_CATEGORY = KeyMapping.Category.register(
+            Identifier.fromNamespaceAndPath(MOD_ID, "checkpoint")
+    );
 
-    private static String pendingRollbackWorld;
-    private static boolean rollbackStarted;
-    private static boolean rollbackShutdownRequested;
-    private static boolean rollbackDisconnectRequested;
+    // Both bindings default to P. The save binding requires Shift to be held,
+    // while the normal P binding restores the checkpoint.
+    private static final KeyMapping SAVE_CHECKPOINT_KEY = KeyBindingHelper.registerKeyBinding(
+            new KeyMapping(
+                    "key.afk-rollback.save_checkpoint",
+                    InputConstants.Type.KEYSYM,
+                    GLFW.GLFW_KEY_P,
+                    CHECKPOINT_CATEGORY
+            )
+    );
 
-    private static final String SNAPSHOT_DIR = "afk-rollback";
-    private static final String SNAPSHOT_TEMP_DIR = "afk-rollback.tmp";
+    private static final KeyMapping LOAD_CHECKPOINT_KEY = KeyBindingHelper.registerKeyBinding(
+            new KeyMapping(
+                    "key.afk-rollback.load_checkpoint",
+                    InputConstants.Type.KEYSYM,
+                    GLFW.GLFW_KEY_P,
+                    CHECKPOINT_CATEGORY
+            )
+    );
+
+    private static String pendingCheckpointWorld;
+    private static boolean checkpointRestoreStarted;
+    private static boolean checkpointRestoreShutdownRequested;
+    private static boolean checkpointRestoreDisconnectRequested;
+    private static boolean checkpointSaveInProgress;
 
     @Override
     public void onInitializeClient() {
-        loadConfig();
         ClientTickEvents.END_CLIENT_TICK.register(AfkRollbackClient::tick);
-        LOGGER.info("AFK Rollback loaded; AFK delay = {} seconds", afkTicks / 20);
-    }
-
-    private static void loadConfig() {
-        Path config = Minecraft.getInstance().gameDirectory.toPath().resolve("config").resolve("afk-rollback.properties");
-        Properties properties = new Properties();
-        try {
-            if (Files.exists(config)) {
-                try (InputStream in = Files.newInputStream(config)) {
-                    properties.load(in);
-                }
-            } else {
-                Files.createDirectories(config.getParent());
-                properties.setProperty("afk_seconds", Long.toString(DEFAULT_AFK_SECONDS));
-                try (var out = Files.newOutputStream(config)) {
-                    properties.store(out, "AFK Rollback settings");
-                }
-            }
-            long seconds = Long.parseLong(properties.getProperty("afk_seconds", Long.toString(DEFAULT_AFK_SECONDS)));
-            seconds = Math.max(1, Math.min(seconds, 3600));
-            afkTicks = seconds * 20;
-        } catch (Exception e) {
-            LOGGER.warn("Could not read config; using {} seconds", DEFAULT_AFK_SECONDS, e);
-            afkTicks = DEFAULT_AFK_SECONDS * 20;
-        }
+        LOGGER.info("AFK Rollback loaded; checkpoint controls registered (Shift+P save, P restore by default)");
     }
 
     private static void tick(Minecraft client) {
-        if (pendingRollbackWorld != null) {
-            processPendingRollback(client);
+        if (pendingCheckpointWorld != null) {
+            processPendingCheckpointRestore(client);
             return;
         }
 
-        Player player = client.player;
-        if (player == null || client.level == null || !client.isSingleplayer()) {
-            resetMovementTracking();
-            return;
+        // A save binding and a load binding may share the same physical key.
+        // Consume both, then use the current Shift state to decide the action.
+        boolean savePressed = false;
+        boolean loadPressed = false;
+        while (SAVE_CHECKPOINT_KEY.consumeClick()) savePressed = true;
+        while (LOAD_CHECKPOINT_KEY.consumeClick()) loadPressed = true;
+
+        if (savePressed && client.player != null && client.level != null && client.isSingleplayer()
+                && hasShiftDown(client)) {
+            createCheckpoint(client);
         }
 
-        double x = player.getX();
-        double y = player.getY();
-        double z = player.getZ();
-
-        if (!haveLastPosition || x != lastX || y != lastY || z != lastZ) {
-            lastX = x;
-            lastY = y;
-            lastZ = z;
-            haveLastPosition = true;
-            if (!wasMoving) {
-                LOGGER.info("Player moved; starting a new AFK idle period.");
-            }
-            wasMoving = true;
-            stillTicks = 0;
-            stillStartMillis = 0;
-            snapshotThisIdlePeriod = false;
-            return;
-        }
-
-        if (wasMoving) {
-            LOGGER.info("Player stopped moving; AFK timer started.");
-            wasMoving = false;
-            stillStartMillis = System.currentTimeMillis();
-        }
-
-        if (stillStartMillis == 0) {
-            stillStartMillis = System.currentTimeMillis();
-        }
-
-        stillTicks++;
-        long stillMillis = System.currentTimeMillis() - stillStartMillis;
-        boolean snapshotMissing = !hasSnapshot();
-        if ((!snapshotThisIdlePeriod || snapshotMissing) && stillMillis >= afkTicks * 50L) {
-            snapshotThisIdlePeriod = true;
-            LOGGER.info("AFK threshold reached; creating rolling snapshot.");
-            createSnapshot(client);
+        if (loadPressed && client.player != null && client.level != null && client.isSingleplayer()
+                && !hasShiftDown(client)) {
+            requestCheckpointRestore();
         }
     }
 
-    private static void resetMovementTracking() {
-        haveLastPosition = false;
-        stillTicks = 0;
-        stillStartMillis = 0;
-        snapshotThisIdlePeriod = false;
-        wasMoving = false;
+    private static boolean hasShiftDown(Minecraft client) {
+        long window = client.getWindow().getWindow();
+        return GLFW.glfwGetKey(window, GLFW.GLFW_KEY_LEFT_SHIFT) == GLFW.GLFW_PRESS
+                || GLFW.glfwGetKey(window, GLFW.GLFW_KEY_RIGHT_SHIFT) == GLFW.GLFW_PRESS;
     }
 
-    private static void createSnapshot(Minecraft client) {
+    private static void createCheckpoint(Minecraft client) {
+        if (checkpointSaveInProgress) {
+            LOGGER.info("Checkpoint save already in progress; ignoring save request.");
+            return;
+        }
+
         IntegratedServer server = client.getSingleplayerServer();
         if (server == null || client.level == null) return;
 
+        checkpointSaveInProgress = true;
+
         try {
             Path world = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
-            Path saves = world.getParent();
-            if (saves == null) return;
-
-            Path snapshot = world.resolve(SNAPSHOT_DIR).normalize();
-            Path snapshotTemp = world.resolve(SNAPSHOT_TEMP_DIR).normalize();
-            if (!snapshot.startsWith(world) || !snapshotTemp.startsWith(world)) {
-                LOGGER.error("Refusing unsafe snapshot path: {}", snapshot);
-                return;
+            Path checkpoint = world.resolve(CHECKPOINT_DIR).normalize();
+            Path checkpointTemp = world.resolve(CHECKPOINT_TEMP_DIR).normalize();
+            if (!checkpoint.startsWith(world) || !checkpointTemp.startsWith(world)) {
+                throw new IOException("Unsafe checkpoint path");
             }
 
-            LOGGER.info("Creating AFK snapshot: {}", snapshot);
-            client.player.displayClientMessage(Component.literal("Creating AFK rollback snapshot..."), true);
+            LOGGER.info("Saving checkpoint: {}", checkpoint);
+            client.player.displayClientMessage(Component.literal("Saving checkpoint..."), true);
 
-            /*
-             * The integrated server owns the world/chunk state. Queue the save
-             * and copy on its thread rather than doing it from the client tick
-             * thread, which can race the chunk system.
-             */
             server.execute(() -> {
                 try {
-                    LOGGER.info("Saving world before AFK snapshot...");
+                    LOGGER.info("Saving world before checkpoint...");
                     server.saveEverything(false, true, true);
 
-                    LOGGER.info("Copying world to AFK snapshot: {}", snapshot);
-                    // Keep the existing snapshot intact until the replacement has
-                    // been copied completely. This matters for large worlds and
-                    // also means a failed copy cannot destroy the last good snapshot.
-                    deleteTree(snapshotTemp);
-                    copyTree(world, snapshotTemp, SNAPSHOT_DIR, SNAPSHOT_TEMP_DIR);
-                    deleteTree(snapshot);
-                    moveTree(snapshotTemp, snapshot);
+                    LOGGER.info("Copying world to checkpoint: {}", checkpoint);
+                    // The current checkpoint remains valid until the complete new
+                    // checkpoint has been copied. This matters for large worlds.
+                    deleteTree(checkpointTemp);
+                    copyTree(world, checkpointTemp, CHECKPOINT_DIR, CHECKPOINT_TEMP_DIR);
+                    deleteTree(checkpoint);
+                    moveTree(checkpointTemp, checkpoint);
 
-                    LOGGER.info("AFK snapshot created successfully");
+                    LOGGER.info("Checkpoint created successfully");
                     client.execute(() -> {
+                        checkpointSaveInProgress = false;
                         if (client.player != null) {
                             client.player.displayClientMessage(
-                                    Component.literal("AFK rollback snapshot created."), true);
+                                    Component.literal("Checkpoint saved."), true);
                         }
                     });
                 } catch (Exception e) {
-                    LOGGER.error("Failed to create AFK snapshot", e);
+                    LOGGER.error("Failed to create checkpoint", e);
                     client.execute(() -> {
+                        checkpointSaveInProgress = false;
                         if (client.player != null) {
                             client.player.displayClientMessage(
-                                    Component.literal("AFK snapshot failed: " + e.getMessage()), true);
+                                    Component.literal("Checkpoint save failed: " + e.getMessage()), true);
                         }
                     });
                 }
             });
         } catch (Exception e) {
-            LOGGER.error("Failed to create AFK snapshot", e);
+            checkpointSaveInProgress = false;
+            LOGGER.error("Could not start checkpoint save", e);
             if (client.player != null) {
-                client.player.displayClientMessage(Component.literal("AFK snapshot failed: " + e.getMessage()), true);
+                client.player.displayClientMessage(
+                        Component.literal("Checkpoint save failed: " + e.getMessage()), true);
             }
         }
     }
 
-    public static boolean hasSnapshot() {
+    public static boolean hasCheckpoint() {
         Minecraft client = Minecraft.getInstance();
         IntegratedServer server = client.getSingleplayerServer();
         if (server == null) return false;
         try {
             Path world = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
-            Path snapshot = world.resolve(SNAPSHOT_DIR).normalize();
-            return snapshot.startsWith(world)
-                    && Files.isDirectory(snapshot)
-                    && Files.exists(snapshot.resolve("level.dat"))
-                    && Files.size(snapshot.resolve("level.dat")) > 0;
+            Path checkpoint = world.resolve(CHECKPOINT_DIR).normalize();
+            return checkpoint.startsWith(world)
+                    && Files.isDirectory(checkpoint)
+                    && Files.exists(checkpoint.resolve("level.dat"));
         } catch (Exception e) {
-            LOGGER.debug("Could not check AFK snapshot", e);
             return false;
         }
     }
 
-    public static void requestRollback() {
+    public static void requestCheckpointRestore() {
         Minecraft client = Minecraft.getInstance();
         IntegratedServer server = client.getSingleplayerServer();
         if (server == null || client.level == null) return;
 
+        if (!hasCheckpoint()) {
+            if (client.player != null) {
+                client.player.displayClientMessage(Component.literal("No checkpoint has been saved."), true);
+            }
+            return;
+        }
+
         try {
             Path world = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
-            pendingRollbackWorld = world.getFileName().toString();
-            rollbackStarted = false;
-            rollbackShutdownRequested = false;
-            rollbackDisconnectRequested = false;
-            LOGGER.info("Rollback requested for world {}", pendingRollbackWorld);
+            pendingCheckpointWorld = world.getFileName().toString();
+            checkpointRestoreStarted = false;
+            checkpointRestoreShutdownRequested = false;
+            checkpointRestoreDisconnectRequested = false;
+            LOGGER.info("Checkpoint restore requested for world {}", pendingCheckpointWorld);
         } catch (Exception e) {
-            LOGGER.error("Could not start rollback", e);
-            pendingRollbackWorld = null;
+            LOGGER.error("Could not start checkpoint restore", e);
+            pendingCheckpointWorld = null;
         }
     }
 
-    private static void processPendingRollback(Minecraft client) {
-        if (rollbackStarted || pendingRollbackWorld == null) return;
+    private static void processPendingCheckpointRestore(Minecraft client) {
+        if (checkpointRestoreStarted || pendingCheckpointWorld == null) return;
 
         IntegratedServer server = client.getSingleplayerServer();
 
-        // First ask the integrated server itself to shut down. This must happen
-        // on the server thread so its final world save finishes before any
-        // world files are touched.
         if (server != null && !server.isStopped()) {
-            if (!rollbackShutdownRequested) {
-                rollbackShutdownRequested = true;
-                LOGGER.info("Requesting integrated server shutdown before rollback...");
+            if (!checkpointRestoreShutdownRequested) {
+                checkpointRestoreShutdownRequested = true;
+                LOGGER.info("Requesting integrated server shutdown before checkpoint restore...");
                 server.execute(() -> server.halt(false));
             }
             return;
         }
 
-        // Only disconnect after the server has completely stopped. Then wait
-        // until Minecraft has released the integrated-server/world references.
         if (client.level != null || client.hasSingleplayerServer()) {
-            if (!rollbackDisconnectRequested) {
-                rollbackDisconnectRequested = true;
+            if (!checkpointRestoreDisconnectRequested) {
+                checkpointRestoreDisconnectRequested = true;
                 LOGGER.info("Integrated server stopped; disconnecting world...");
                 client.disconnect(new TitleScreen(), false, true);
             }
             return;
         }
 
-        rollbackStarted = true;
-        String worldName = pendingRollbackWorld;
-        pendingRollbackWorld = null;
-        rollbackShutdownRequested = false;
-        rollbackDisconnectRequested = false;
+        checkpointRestoreStarted = true;
+        String worldName = pendingCheckpointWorld;
+        pendingCheckpointWorld = null;
+        checkpointRestoreShutdownRequested = false;
+        checkpointRestoreDisconnectRequested = false;
 
         Path saves = client.getLevelSource().getBaseDir().toAbsolutePath().normalize();
         Path world = saves.resolve(worldName).normalize();
-        Path snapshot = world.resolve(SNAPSHOT_DIR).normalize();
+        Path checkpoint = world.resolve(CHECKPOINT_DIR).normalize();
 
         try {
-            if (!world.startsWith(saves) || !snapshot.startsWith(world)) {
+            if (!world.startsWith(saves) || !checkpoint.startsWith(world)) {
                 throw new IOException("Unsafe world path");
             }
-            if (!Files.isDirectory(snapshot) || !Files.exists(snapshot.resolve("level.dat"))) {
-                throw new IOException("No valid AFK snapshot exists");
+            if (!Files.isDirectory(checkpoint) || !Files.exists(checkpoint.resolve("level.dat"))) {
+                throw new IOException("No valid checkpoint exists");
             }
 
-            LOGGER.info("Restoring AFK snapshot {} -> {}", snapshot, world);
-            // Keep afk-rollback in place. It is the persistent checkpoint and
-            // must survive both restoration and the subsequent world load.
-            deleteTreeExcept(world, SNAPSHOT_DIR);
-            copyTree(snapshot, world);
-            LOGGER.info("AFK snapshot restored successfully; checkpoint kept at {}", snapshot);
+            LOGGER.info("Restoring checkpoint {} -> {}", checkpoint, world);
+            // Keep checkpoint in place. It is deliberately persistent and is only
+            // replaced when Shift+P creates a new checkpoint.
+            deleteTreeExcept(world, CHECKPOINT_DIR);
+            copyTree(checkpoint, world);
+            LOGGER.info("Checkpoint restored successfully; checkpoint kept at {}", checkpoint);
 
             client.createWorldOpenFlows().openWorld(worldName, () -> {
-                LOGGER.info("AFK rollback load cancelled");
+                LOGGER.info("Checkpoint restore load cancelled");
             });
         } catch (Exception e) {
-            LOGGER.error("AFK rollback failed", e);
+            LOGGER.error("Checkpoint restore failed", e);
             client.setScreen(new TitleScreen());
         } finally {
-            rollbackStarted = false;
+            checkpointRestoreStarted = false;
         }
     }
 
-    private static void copyTree(Path source, Path target, String... excludedRootDirectories) throws IOException {
+    private static void copyTree(Path source, Path target, String... ignoredDirectories) throws IOException {
         Files.walkFileTree(source, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
                 Path relative = source.relativize(dir);
-                if (!relative.toString().isEmpty() && (relative.toString().equals(SNAPSHOT_DIR) || relative.toString().equals(SNAPSHOT_TEMP_DIR))) {
+                if (!relative.toString().isEmpty()
+                        && (relative.toString().equals(CHECKPOINT_DIR)
+                        || relative.toString().equals(CHECKPOINT_TEMP_DIR))) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
                 Files.createDirectories(target.resolve(relative));

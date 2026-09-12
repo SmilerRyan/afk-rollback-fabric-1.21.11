@@ -3,7 +3,7 @@
   "id": "afk-rollback",
   "version": "${version}",
   "name": "AFK Rollback",
-  "description": "Keeps one rolling world snapshot from when you go AFK and lets you roll back to it after dying.",
+  "description": "Lets you save one manual checkpoint and restore it after dying or on demand.",
   "authors": ["HaZeyBot"],
   "contact": {
     "sources": "https://github.com/"

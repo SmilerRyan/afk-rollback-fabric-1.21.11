@@ -1,0 +1,5 @@
+{
+  "key.category.afk-rollback.checkpoint": "AFK Rollback",
+  "key.afk-rollback.save_checkpoint": "Save checkpoint",
+  "key.afk-rollback.load_checkpoint": "Restore checkpoint"
+}

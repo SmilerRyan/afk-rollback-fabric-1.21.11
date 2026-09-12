@@ -14,7 +14,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class DeathScreenMixin {
     @Inject(method = "init", at = @At("TAIL"))
     private void afkRollback$addRollbackButton(CallbackInfo ci) {
-        if (!AfkRollbackClient.hasSnapshot()) return;
+        if (!AfkRollbackClient.hasCheckpoint()) return;
 
         Minecraft client = Minecraft.getInstance();
         int buttonWidth = 180;
@@ -24,8 +24,8 @@ public abstract class DeathScreenMixin {
 
         ((ScreenInvoker) (Object) this).afkRollback$callAddRenderableWidget(
                 Button.builder(
-                        Component.literal("Rollback to AFK Snapshot"),
-                        button -> AfkRollbackClient.requestRollback()
+                        Component.literal("Last checkpoint"),
+                        button -> AfkRollbackClient.requestCheckpointRestore()
                 ).bounds(x, y, buttonWidth, buttonHeight).build()
         );
     }
