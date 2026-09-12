@@ -34,6 +34,8 @@ public final class AfkRollbackClient implements ClientModInitializer {
     private static boolean haveLastPosition;
     private static long stillTicks;
     private static boolean snapshotThisIdlePeriod;
+    private static boolean snapshotInProgress;
+    private static long idlePeriodId;
     private static boolean wasMoving;
 
     private static String pendingRollbackWorld;
@@ -102,6 +104,7 @@ public final class AfkRollbackClient implements ClientModInitializer {
             wasMoving = true;
             stillTicks = 0;
             snapshotThisIdlePeriod = false;
+            idlePeriodId++;
             return;
         }
 
@@ -111,10 +114,12 @@ public final class AfkRollbackClient implements ClientModInitializer {
         }
 
         stillTicks++;
-        if (!snapshotThisIdlePeriod && stillTicks >= afkTicks) {
-            snapshotThisIdlePeriod = true;
-            LOGGER.info("AFK threshold reached; creating rolling snapshot.");
-            createSnapshot(client);
+        if (stillTicks >= afkTicks && !snapshotInProgress) {
+            boolean snapshotExists = hasSnapshot();
+            if (!snapshotThisIdlePeriod || !snapshotExists) {
+                LOGGER.info("AFK threshold reached; creating rolling snapshot.");
+                createSnapshot(client, idlePeriodId);
+            }
         }
     }
 
@@ -125,7 +130,7 @@ public final class AfkRollbackClient implements ClientModInitializer {
         wasMoving = false;
     }
 
-    private static void createSnapshot(Minecraft client) {
+    private static void createSnapshot(Minecraft client, long snapshotIdlePeriodId) {
         IntegratedServer server = client.getSingleplayerServer();
         if (server == null || client.level == null) return;
 
@@ -141,6 +146,8 @@ public final class AfkRollbackClient implements ClientModInitializer {
                 return;
             }
 
+            if (snapshotInProgress) return;
+            snapshotInProgress = true;
             LOGGER.info("Creating AFK snapshot: {}", snapshot);
             client.player.displayClientMessage(Component.literal("Creating AFK rollback snapshot..."), true);
 
@@ -165,6 +172,11 @@ public final class AfkRollbackClient implements ClientModInitializer {
 
                     LOGGER.info("AFK snapshot created successfully");
                     client.execute(() -> {
+                        snapshotInProgress = false;
+                        // If the player moved while the large snapshot copy was
+                        // running, this snapshot belongs to the previous idle
+                        // period. The new idle period must get its own snapshot.
+                        snapshotThisIdlePeriod = (idlePeriodId == snapshotIdlePeriodId);
                         if (client.player != null) {
                             client.player.displayClientMessage(
                                     Component.literal("AFK rollback snapshot created."), true);
@@ -173,6 +185,8 @@ public final class AfkRollbackClient implements ClientModInitializer {
                 } catch (Exception e) {
                     LOGGER.error("Failed to create AFK snapshot", e);
                     client.execute(() -> {
+                        snapshotInProgress = false;
+                        snapshotThisIdlePeriod = false;
                         if (client.player != null) {
                             client.player.displayClientMessage(
                                     Component.literal("AFK snapshot failed: " + e.getMessage()), true);
@@ -181,6 +195,8 @@ public final class AfkRollbackClient implements ClientModInitializer {
                 }
             });
         } catch (Exception e) {
+            snapshotInProgress = false;
+            snapshotThisIdlePeriod = false;
             LOGGER.error("Failed to create AFK snapshot", e);
             if (client.player != null) {
                 client.player.displayClientMessage(Component.literal("AFK snapshot failed: " + e.getMessage()), true);
