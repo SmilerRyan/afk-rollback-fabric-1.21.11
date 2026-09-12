@@ -1,15 +1,16 @@
 {
   "schemaVersion": 1,
-  "id": "oneworldrollback",
+  "id": "one-world-rollback",
   "version": "${version}",
-  "name": "OneWorldRollback",
-  "description": "A client-side manual world backup and rollback mod.",
+  "name": "One World Rollback",
+  "description": "A client-side mod to let you take ONE backup of a world and roll back to it at any time.",
   "authors": [
     "SmilerRyan"
   ],
   "contact": {
     "sources": "https://github.com/"
   },
+  "icon": "icon.png",
   "license": "MIT",
   "environment": "client",
   "entrypoints": {
