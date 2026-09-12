@@ -40,6 +40,9 @@ public final class AfkRollbackClient implements ClientModInitializer {
     private static boolean rollbackShutdownRequested;
     private static boolean rollbackDisconnectRequested;
 
+    private static final String SNAPSHOT_DIR = "afk-rollback";
+    private static final String SNAPSHOT_TEMP_DIR = "afk-rollback.tmp";
+
     @Override
     public void onInitializeClient() {
         loadConfig();
@@ -119,8 +122,9 @@ public final class AfkRollbackClient implements ClientModInitializer {
             Path saves = world.getParent();
             if (saves == null) return;
 
-            Path snapshot = saves.resolve(world.getFileName().toString() + "-afk").normalize();
-            if (!snapshot.startsWith(saves)) {
+            Path snapshot = world.resolve(SNAPSHOT_DIR).normalize();
+            Path snapshotTemp = world.resolve(SNAPSHOT_TEMP_DIR).normalize();
+            if (!snapshot.startsWith(world) || !snapshotTemp.startsWith(world)) {
                 LOGGER.error("Refusing unsafe snapshot path: {}", snapshot);
                 return;
             }
@@ -139,8 +143,13 @@ public final class AfkRollbackClient implements ClientModInitializer {
                     server.saveEverything(false, true, true);
 
                     LOGGER.info("Copying world to AFK snapshot: {}", snapshot);
+                    // Keep the existing snapshot intact until the replacement has
+                    // been copied completely. This matters for large worlds and
+                    // also means a failed copy cannot destroy the last good snapshot.
+                    deleteTree(snapshotTemp);
+                    copyTree(world, snapshotTemp, SNAPSHOT_DIR, SNAPSHOT_TEMP_DIR);
                     deleteTree(snapshot);
-                    copyTree(world, snapshot);
+                    moveTree(snapshotTemp, snapshot);
 
                     LOGGER.info("AFK snapshot created successfully");
                     client.execute(() -> {
@@ -247,9 +256,11 @@ public final class AfkRollbackClient implements ClientModInitializer {
             }
 
             LOGGER.info("Restoring AFK snapshot {} -> {}", snapshot, world);
-            deleteTree(world);
+            // Keep afk-rollback in place. It is the persistent checkpoint and
+            // must survive both restoration and the subsequent world load.
+            deleteTreeExcept(world, SNAPSHOT_DIR);
             copyTree(snapshot, world);
-            LOGGER.info("AFK snapshot restored successfully; loading {}", worldName);
+            LOGGER.info("AFK snapshot restored successfully; checkpoint kept at {}", snapshot);
 
             client.createWorldOpenFlows().openWorld(worldName, () -> {
                 LOGGER.info("AFK rollback load cancelled");
@@ -262,12 +273,14 @@ public final class AfkRollbackClient implements ClientModInitializer {
         }
     }
 
-    private static void copyTree(Path source, Path target) throws IOException {
+    private static void copyTree(Path source, Path target, String... excludedRootDirectories) throws IOException {
         Files.walkFileTree(source, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
                 Path relative = source.relativize(dir);
-                if (relative.toString().equals("session.lock")) return FileVisitResult.SKIP_SUBTREE;
+                if (!relative.toString().isEmpty() && (relative.toString().equals(SNAPSHOT_DIR) || relative.toString().equals(SNAPSHOT_TEMP_DIR))) {
+                    return FileVisitResult.SKIP_SUBTREE;
+                }
                 Files.createDirectories(target.resolve(relative));
                 return FileVisitResult.CONTINUE;
             }
@@ -280,6 +293,42 @@ public final class AfkRollbackClient implements ClientModInitializer {
                 return FileVisitResult.CONTINUE;
             }
         });
+    }
+
+    private static void deleteTreeExcept(Path root, String directoryToKeep) throws IOException {
+        if (!Files.exists(root)) return;
+        Files.walkFileTree(root, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+                if (!dir.equals(root) && dir.getFileName().toString().equals(directoryToKeep)) {
+                    return FileVisitResult.SKIP_SUBTREE;
+                }
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                Files.deleteIfExists(file);
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                if (exc != null) throw exc;
+                if (!dir.equals(root) && !dir.getFileName().toString().equals(directoryToKeep)) {
+                    Files.deleteIfExists(dir);
+                }
+                return FileVisitResult.CONTINUE;
+            }
+        });
+    }
+
+    private static void moveTree(Path source, Path target) throws IOException {
+        try {
+            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
+        } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+            Files.move(source, target);
+        }
     }
 
     private static void deleteTree(Path root) throws IOException {
