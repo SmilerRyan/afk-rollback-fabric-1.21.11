@@ -58,6 +58,8 @@ public final class AfkRollbackClient implements ClientModInitializer {
     private static boolean checkpointRestoreShutdownRequested;
     private static boolean checkpointRestoreDisconnectRequested;
     private static boolean checkpointSaveInProgress;
+    private static boolean saveWasDown;
+    private static boolean loadWasDown;
 
     @Override
     public void onInitializeClient() {
@@ -71,10 +73,16 @@ public final class AfkRollbackClient implements ClientModInitializer {
             return;
         }
 
-        boolean savePressed = false;
-        boolean loadPressed = false;
-        while (SAVE_CHECKPOINT_KEY.consumeClick()) savePressed = true;
-        while (LOAD_CHECKPOINT_KEY.consumeClick()) loadPressed = true;
+        boolean saveDown = SAVE_CHECKPOINT_KEY.isDown();
+        boolean loadDown = LOAD_CHECKPOINT_KEY.isDown();
+
+        // Use the binding's live state rather than consumeClick(). This makes the
+        // action work reliably for both keyboard and mouse bindings, including
+        // bindings that were initially unbound and assigned later in Controls.
+        boolean savePressed = saveDown && !saveWasDown;
+        boolean loadPressed = loadDown && !loadWasDown;
+        saveWasDown = saveDown;
+        loadWasDown = loadDown;
 
         if (savePressed && client.player != null && client.level != null && client.isSingleplayer()) {
             createCheckpoint(client);
