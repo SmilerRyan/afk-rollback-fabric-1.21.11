@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "afk-rollback",
+  "version": "${version}",
+  "name": "AFK Rollback",
+  "description": "Keeps one rolling world snapshot from when you go AFK and lets you roll back to it after dying.",
+  "authors": ["HaZeyBot"],
+  "contact": {
+    "sources": "https://github.com/"
+  },
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.hazeybot.afkrollback.AfkRollbackClient"
+    ]
+  },
+  "mixins": [
+    {
+      "config": "afk-rollback.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=0.18.0",
+    "minecraft": "~1.21.11",
+    "fabric-api": ">=0.141.0"
+  }
+}
