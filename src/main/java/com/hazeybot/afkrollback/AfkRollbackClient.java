@@ -11,7 +11,6 @@ import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.level.storage.LevelResource;
-import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -91,9 +90,7 @@ public final class AfkRollbackClient implements ClientModInitializer {
     }
 
     private static boolean hasShiftDown(Minecraft client) {
-        long window = client.getWindow().getHandle();
-        return GLFW.glfwGetKey(window, GLFW.GLFW_KEY_LEFT_SHIFT) == GLFW.GLFW_PRESS
-                || GLFW.glfwGetKey(window, GLFW.GLFW_KEY_RIGHT_SHIFT) == GLFW.GLFW_PRESS;
+        return client.hasShiftDown();
     }
 
     private static void createCheckpoint(Minecraft client) {
