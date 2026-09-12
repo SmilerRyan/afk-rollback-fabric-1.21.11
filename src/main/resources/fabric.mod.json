@@ -1,10 +1,12 @@
 {
   "schemaVersion": 1,
-  "id": "afk-rollback",
+  "id": "oneworldrollback",
   "version": "${version}",
-  "name": "AFK Rollback",
-  "description": "Lets you save one manual checkpoint and restore it after dying or on demand.",
-  "authors": ["HaZeyBot"],
+  "name": "OneWorldRollback",
+  "description": "A client-side manual world backup and rollback mod.",
+  "authors": [
+    "SmilerRyan"
+  ],
   "contact": {
     "sources": "https://github.com/"
   },
@@ -17,7 +19,7 @@
   },
   "mixins": [
     {
-      "config": "afk-rollback.mixins.json",
+      "config": "oneworldrollback.mixins.json",
       "environment": "client"
     }
   ],

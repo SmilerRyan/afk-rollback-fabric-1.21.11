@@ -23,7 +23,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 
 public final class AfkRollbackClient implements ClientModInitializer {
-    public static final String MOD_ID = "afk-rollback";
+    public static final String MOD_ID = "oneworldrollback";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
     private static final String CHECKPOINT_DIR = "checkpoint";
@@ -34,22 +34,21 @@ public final class AfkRollbackClient implements ClientModInitializer {
             Identifier.fromNamespaceAndPath(MOD_ID, "checkpoint")
     );
 
-    // Both bindings default to P. The save binding requires Shift to be held,
-    // while the normal P binding restores the checkpoint.
+    // Both bindings start unbound. They can be assigned to any supported input in Controls.
     private static final KeyMapping SAVE_CHECKPOINT_KEY = KeyBindingHelper.registerKeyBinding(
             new KeyMapping(
-                    "key.afk-rollback.save_checkpoint",
+                    "key.oneworldrollback.backup",
                     InputConstants.Type.KEYSYM,
-                    80,
+                    InputConstants.UNKNOWN.getValue(),
                     CHECKPOINT_CATEGORY
             )
     );
 
     private static final KeyMapping LOAD_CHECKPOINT_KEY = KeyBindingHelper.registerKeyBinding(
             new KeyMapping(
-                    "key.afk-rollback.load_checkpoint",
+                    "key.oneworldrollback.rollback",
                     InputConstants.Type.KEYSYM,
-                    80,
+                    InputConstants.UNKNOWN.getValue(),
                     CHECKPOINT_CATEGORY
             )
     );
@@ -63,7 +62,7 @@ public final class AfkRollbackClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         ClientTickEvents.END_CLIENT_TICK.register(AfkRollbackClient::tick);
-        LOGGER.info("AFK Rollback loaded; checkpoint controls registered (Shift+P save, P restore by default)");
+        LOGGER.info("OneWorldRollback loaded; Backup and Rollback controls registered");
     }
 
     private static void tick(Minecraft client) {
@@ -72,25 +71,16 @@ public final class AfkRollbackClient implements ClientModInitializer {
             return;
         }
 
-        // Consume both configurable bindings. If they share the same physical
-        // binding (the default P/P setup), Shift+P means save and P means load.
-        // If the user assigns different inputs (for example Left Click = save
-        // and P = load), the save binding works directly with no modifier.
         boolean savePressed = false;
         boolean loadPressed = false;
         while (SAVE_CHECKPOINT_KEY.consumeClick()) savePressed = true;
         while (LOAD_CHECKPOINT_KEY.consumeClick()) loadPressed = true;
 
-        boolean sameBinding = SAVE_CHECKPOINT_KEY.same(LOAD_CHECKPOINT_KEY);
-        boolean shiftDown = client.hasShiftDown();
-
-        if (savePressed && client.player != null && client.level != null && client.isSingleplayer()
-                && (!sameBinding || shiftDown)) {
+        if (savePressed && client.player != null && client.level != null && client.isSingleplayer()) {
             createCheckpoint(client);
         }
 
-        if (loadPressed && client.player != null && client.level != null && client.isSingleplayer()
-                && (!sameBinding || !shiftDown)) {
+        if (loadPressed && client.player != null && client.level != null && client.isSingleplayer()) {
             requestCheckpointRestore();
         }
     }
@@ -195,10 +185,14 @@ public final class AfkRollbackClient implements ClientModInitializer {
             long minutes = (elapsedSeconds % 3600L) / 60L;
             long seconds = elapsedSeconds % 60L;
 
-            return String.format(
-                    "Load Last Checkpoint (%dd %dh %dm %ds ago)",
-                    days, hours, minutes, seconds
-            );
+            StringBuilder age = new StringBuilder();
+            if (days > 0) age.append(days).append("d ");
+            if (hours > 0) age.append(hours).append("h ");
+            if (minutes > 0) age.append(minutes).append("m ");
+            if (seconds > 0 || age.isEmpty()) age.append(seconds).append("s");
+            else age.setLength(age.length() - 1);
+
+            return "Roll back to " + age + " ago";
         } catch (Exception e) {
             return "Load Last Checkpoint";
         }
