@@ -11,7 +11,7 @@ echo Using JAVA_HOME=%JAVA_HOME%
 java -version
 
 echo.
-echo Building AFK Rollback...
+echo Building OneWorldRollback...
 echo.
 
 call "%~dp0gradlew.bat" --no-daemon build %*
