@@ -35,3 +35,9 @@ Roll back to 2h 14m 37s ago
 ```
 
 Zero-valued time units are omitted.
+
+
+Rollback avoids the normal title/disconnect screen. The existing world view is kept as long as Minecraft allows while the server is stopped and the files are replaced, then the world is reopened normally.
+
+
+Rollback uses a temporary in-game transition screen while Minecraft stops and restarts the integrated server, so the normal Saving World and Loading Terrain screens are covered.
