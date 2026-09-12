@@ -39,7 +39,7 @@ public final class AfkRollbackClient implements ClientModInitializer {
             new KeyMapping(
                     "key.afk-rollback.save_checkpoint",
                     InputConstants.Type.KEYSYM,
-                    GLFW.GLFW_KEY_P,
+                    80,
                     CHECKPOINT_CATEGORY
             )
     );
@@ -48,7 +48,7 @@ public final class AfkRollbackClient implements ClientModInitializer {
             new KeyMapping(
                     "key.afk-rollback.load_checkpoint",
                     InputConstants.Type.KEYSYM,
-                    GLFW.GLFW_KEY_P,
+                    80,
                     CHECKPOINT_CATEGORY
             )
     );
