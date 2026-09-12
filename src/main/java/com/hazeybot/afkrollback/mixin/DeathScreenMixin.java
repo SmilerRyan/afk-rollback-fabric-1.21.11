@@ -5,6 +5,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.DeathScreen;
 import net.minecraft.network.chat.Component;
+
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -24,7 +25,7 @@ public abstract class DeathScreenMixin {
 
         ((ScreenInvoker) (Object) this).afkRollback$callAddRenderableWidget(
                 Button.builder(
-                        Component.literal("Last checkpoint"),
+                        Component.literal(AfkRollbackClient.getCheckpointButtonText()),
                         button -> AfkRollbackClient.requestCheckpointRestore()
                 ).bounds(x, y, buttonWidth, buttonHeight).build()
         );

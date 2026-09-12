@@ -28,6 +28,7 @@ public final class AfkRollbackClient implements ClientModInitializer {
 
     private static final String CHECKPOINT_DIR = "checkpoint";
     private static final String CHECKPOINT_TEMP_DIR = "checkpoint.tmp";
+    private static final String CHECKPOINT_TIMESTAMP_FILE = "checkpoint.timestamp";
 
     private static final KeyMapping.Category CHECKPOINT_CATEGORY = KeyMapping.Category.register(
             Identifier.fromNamespaceAndPath(MOD_ID, "checkpoint")
@@ -71,26 +72,27 @@ public final class AfkRollbackClient implements ClientModInitializer {
             return;
         }
 
-        // A save binding and a load binding may share the same physical key.
-        // Consume both, then use the current Shift state to decide the action.
+        // Consume both configurable bindings. If they share the same physical
+        // binding (the default P/P setup), Shift+P means save and P means load.
+        // If the user assigns different inputs (for example Left Click = save
+        // and P = load), the save binding works directly with no modifier.
         boolean savePressed = false;
         boolean loadPressed = false;
         while (SAVE_CHECKPOINT_KEY.consumeClick()) savePressed = true;
         while (LOAD_CHECKPOINT_KEY.consumeClick()) loadPressed = true;
 
+        boolean sameBinding = SAVE_CHECKPOINT_KEY.same(LOAD_CHECKPOINT_KEY);
+        boolean shiftDown = client.hasShiftDown();
+
         if (savePressed && client.player != null && client.level != null && client.isSingleplayer()
-                && hasShiftDown(client)) {
+                && (!sameBinding || shiftDown)) {
             createCheckpoint(client);
         }
 
         if (loadPressed && client.player != null && client.level != null && client.isSingleplayer()
-                && !hasShiftDown(client)) {
+                && (!sameBinding || !shiftDown)) {
             requestCheckpointRestore();
         }
-    }
-
-    private static boolean hasShiftDown(Minecraft client) {
-        return client.hasShiftDown();
     }
 
     private static void createCheckpoint(Minecraft client) {
@@ -124,7 +126,11 @@ public final class AfkRollbackClient implements ClientModInitializer {
                     // The current checkpoint remains valid until the complete new
                     // checkpoint has been copied. This matters for large worlds.
                     deleteTree(checkpointTemp);
-                    copyTree(world, checkpointTemp, CHECKPOINT_DIR, CHECKPOINT_TEMP_DIR);
+                    copyTree(world, checkpointTemp, CHECKPOINT_DIR, CHECKPOINT_TEMP_DIR, CHECKPOINT_TIMESTAMP_FILE);
+                    Files.writeString(
+                            checkpointTemp.resolve(CHECKPOINT_TIMESTAMP_FILE),
+                            Long.toString(System.currentTimeMillis())
+                    );
                     deleteTree(checkpoint);
                     moveTree(checkpointTemp, checkpoint);
 
@@ -169,6 +175,32 @@ public final class AfkRollbackClient implements ClientModInitializer {
                     && Files.exists(checkpoint.resolve("level.dat"));
         } catch (Exception e) {
             return false;
+        }
+    }
+
+    public static String getCheckpointButtonText() {
+        Minecraft client = Minecraft.getInstance();
+        IntegratedServer server = client.getSingleplayerServer();
+        if (server == null) return "Load Last Checkpoint";
+
+        try {
+            Path world = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
+            Path timestampFile = world.resolve(CHECKPOINT_DIR).resolve(CHECKPOINT_TIMESTAMP_FILE);
+            if (!Files.exists(timestampFile)) return "Load Last Checkpoint";
+
+            long savedAt = Long.parseLong(Files.readString(timestampFile).trim());
+            long elapsedSeconds = Math.max(0L, (System.currentTimeMillis() - savedAt) / 1000L);
+            long days = elapsedSeconds / 86400L;
+            long hours = (elapsedSeconds % 86400L) / 3600L;
+            long minutes = (elapsedSeconds % 3600L) / 60L;
+            long seconds = elapsedSeconds % 60L;
+
+            return String.format(
+                    "Load Last Checkpoint (%dd %dh %dm %ds ago)",
+                    days, hours, minutes, seconds
+            );
+        } catch (Exception e) {
+            return "Load Last Checkpoint";
         }
     }
 
@@ -242,7 +274,7 @@ public final class AfkRollbackClient implements ClientModInitializer {
             // Keep checkpoint in place. It is deliberately persistent and is only
             // replaced when Shift+P creates a new checkpoint.
             deleteTreeExcept(world, CHECKPOINT_DIR);
-            copyTree(checkpoint, world);
+            copyTree(checkpoint, world, CHECKPOINT_TIMESTAMP_FILE);
             LOGGER.info("Checkpoint restored successfully; checkpoint kept at {}", checkpoint);
 
             client.createWorldOpenFlows().openWorld(worldName, () -> {
@@ -256,14 +288,13 @@ public final class AfkRollbackClient implements ClientModInitializer {
         }
     }
 
-    private static void copyTree(Path source, Path target, String... ignoredDirectories) throws IOException {
+    private static void copyTree(Path source, Path target, String... ignoredNames) throws IOException {
+        java.util.Set<String> ignored = java.util.Set.of(ignoredNames);
         Files.walkFileTree(source, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
                 Path relative = source.relativize(dir);
-                if (!relative.toString().isEmpty()
-                        && (relative.toString().equals(CHECKPOINT_DIR)
-                        || relative.toString().equals(CHECKPOINT_TEMP_DIR))) {
+                if (!relative.toString().isEmpty() && ignored.contains(relative.getFileName().toString())) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
                 Files.createDirectories(target.resolve(relative));
@@ -273,7 +304,10 @@ public final class AfkRollbackClient implements ClientModInitializer {
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
                 Path relative = source.relativize(file);
-                if (relative.getFileName().toString().equals("session.lock")) return FileVisitResult.CONTINUE;
+                if (file.getFileName().toString().equals("session.lock")
+                        || ignored.contains(file.getFileName().toString())) {
+                    return FileVisitResult.CONTINUE;
+                }
                 Files.copy(file, target.resolve(relative), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
                 return FileVisitResult.CONTINUE;
             }
