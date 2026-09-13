@@ -26,8 +26,11 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
+import java.util.zip.CRC32;
+import java.util.HashSet;
+import java.util.Set;
 
 public final class AfkRollbackClient implements ClientModInitializer {
     public static final String MOD_ID = "oneworldrollback";
@@ -300,7 +303,7 @@ public final class AfkRollbackClient implements ClientModInitializer {
             LOGGER.info("Restoring checkpoint {} -> {}", checkpoint, world);
             // Keep checkpoint.zip in place. It is deliberately persistent and is
             // only replaced when a new checkpoint is created.
-            deleteTreeExcept(world, CHECKPOINT_FILE);
+            // Restore directly from the ZIP. unzipWorld() skips files whose size + CRC32 already match.
             unzipWorld(checkpoint, world);
             LOGGER.info("Checkpoint restored successfully; checkpoint kept at {}", checkpoint);
 
@@ -320,6 +323,10 @@ public final class AfkRollbackClient implements ClientModInitializer {
     private static void zipWorld(Path world, Path zipFile) throws IOException {
         try (OutputStream output = Files.newOutputStream(zipFile);
              ZipOutputStream zip = new ZipOutputStream(output)) {
+            // A low compression level makes checkpoint creation much faster while
+            // still keeping every file independently compressed in the ZIP.
+            zip.setLevel(1);
+
             Files.walkFileTree(world, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
@@ -331,7 +338,8 @@ public final class AfkRollbackClient implements ClientModInitializer {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
 
-                    zip.putNextEntry(new ZipEntry(name));
+                    ZipEntry entry = new ZipEntry(name);
+                    zip.putNextEntry(entry);
                     zip.closeEntry();
                     return FileVisitResult.CONTINUE;
                 }
@@ -346,25 +354,14 @@ public final class AfkRollbackClient implements ClientModInitializer {
                     }
 
                     Path relative = world.relativize(file);
-                    ZipEntry entry = new ZipEntry(relative.toString().replace(java.io.File.separatorChar, '/'));
+                    ZipEntry entry = new ZipEntry(
+                            relative.toString().replace(java.io.File.separatorChar, '/'));
 
-                    // MCA region files already contain compressed chunk data, so
-                    // deflating them again wastes CPU. Store .mca files directly;
-                    // all other files continue to use normal ZIP compression.
-                    boolean isMca = filename.toLowerCase(java.util.Locale.ROOT).endsWith(".mca");
-                    if (isMca) {
-                        entry.setMethod(ZipEntry.STORED);
-                        entry.setSize(attrs.size());
-                        java.util.zip.CRC32 crc = new java.util.zip.CRC32();
-                        try (InputStream input = Files.newInputStream(file)) {
-                            byte[] buffer = new byte[8192];
-                            int read;
-                            while ((read = input.read(buffer)) != -1) {
-                                crc.update(buffer, 0, read);
-                            }
-                        }
-                        entry.setCrc(crc.getValue());
-                    }
+                    // Every file is its own ZIP entry, so ZipFile can later open
+                    // exactly the file it needs without extracting the archive
+                    // from the beginning. Do not use STORED entries here: the
+                    // checkpoint format intentionally compresses every file.
+                    entry.setMethod(ZipEntry.DEFLATED);
 
                     zip.putNextEntry(entry);
                     try (InputStream input = Files.newInputStream(file)) {
@@ -378,60 +375,108 @@ public final class AfkRollbackClient implements ClientModInitializer {
     }
 
     private static void unzipWorld(Path zipFile, Path world) throws IOException {
-        try (InputStream input = Files.newInputStream(zipFile);
-             ZipInputStream zip = new ZipInputStream(input)) {
-            ZipEntry entry;
-            while ((entry = zip.getNextEntry()) != null) {
-                Path target = world.resolve(entry.getName()).normalize();
+        // ZipFile uses the ZIP central directory, allowing individual entries to
+        // be opened directly. This is substantially faster than ZipInputStream
+        // for rollback because unchanged files can be skipped without reading
+        // their compressed data at all.
+        try (ZipFile zip = new ZipFile(zipFile.toFile())) {
+            Set<String> checkpointFiles = new HashSet<>();
+            Set<Path> checkpointDirectories = new HashSet<>();
+
+            var entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                String entryName = entry.getName().replace('\\', '/');
 
                 // Prevent a crafted checkpoint.zip from writing outside the world.
+                Path target = world.resolve(entryName).normalize();
                 if (!target.startsWith(world)) {
-                    throw new IOException("Unsafe path in checkpoint ZIP: " + entry.getName());
+                    throw new IOException("Unsafe path in checkpoint ZIP: " + entryName);
                 }
 
                 if (entry.isDirectory()) {
-                    Files.createDirectories(target);
-                } else {
-                    Path parent = target.getParent();
-                    if (parent != null) Files.createDirectories(parent);
-                    try (OutputStream output = Files.newOutputStream(target)) {
-                        zip.transferTo(output);
+                    checkpointDirectories.add(target);
+                    continue;
+                }
+
+                checkpointFiles.add(target.toString());
+
+                Path parent = target.getParent();
+                if (parent != null) Files.createDirectories(parent);
+
+                // If the current file has exactly the same size and CRC32 as the
+                // checkpoint entry, it is already identical and does not need to
+                // be deleted or extracted. This avoids both disk writes and
+                // decompression for unchanged Minecraft files.
+                if (Files.isRegularFile(target)) {
+                    long currentSize = Files.size(target);
+                    if (currentSize == entry.getSize()) {
+                        long currentCrc = crc32(target);
+                        if (currentCrc == entry.getCrc()) {
+                            continue;
+                        }
                     }
                 }
-                zip.closeEntry();
+
+                LOGGER.debug("Restoring changed file: {}", entryName);
+                try (InputStream input = zip.getInputStream(entry);
+                     OutputStream output = Files.newOutputStream(
+                             target,
+                             java.nio.file.StandardOpenOption.CREATE,
+                             java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
+                             java.nio.file.StandardOpenOption.WRITE)) {
+                    input.transferTo(output);
+                }
             }
+
+            // Remove files that existed in the live world but are not present in
+            // the checkpoint. checkpoint.zip itself is deliberately preserved.
+            Files.walkFileTree(world, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                    if (file.getFileName().toString().equals(CHECKPOINT_FILE)
+                            || file.getFileName().toString().equals(CHECKPOINT_TEMP_FILE)
+                            || file.getFileName().toString().equals("session.lock")) {
+                        return FileVisitResult.CONTINUE;
+                    }
+
+                    if (!checkpointFiles.contains(file.toString())) {
+                        Files.deleteIfExists(file);
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                    if (exc != null) throw exc;
+                    if (dir.equals(world)) return FileVisitResult.CONTINUE;
+
+                    // Delete directories only when they are not represented by
+                    // the checkpoint. Non-empty directories are left alone; any
+                    // stale files inside them have already been removed above.
+                    if (!checkpointDirectories.contains(dir)) {
+                        try {
+                            Files.deleteIfExists(dir);
+                        } catch (java.nio.file.DirectoryNotEmptyException ignored) {
+                            // Leave non-empty directory alone.
+                        }
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+            });
         }
     }
 
-    private static void deleteTreeExcept(Path root, String fileToKeep) throws IOException {
-        if (!Files.exists(root)) return;
-        Files.walkFileTree(root, new SimpleFileVisitor<>() {
-            @Override
-            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
-                if (!dir.equals(root) && dir.getFileName().toString().equals(fileToKeep)) {
-                    return FileVisitResult.SKIP_SUBTREE;
-                }
-                return FileVisitResult.CONTINUE;
+    private static long crc32(Path file) throws IOException {
+        CRC32 crc = new CRC32();
+        try (InputStream input = Files.newInputStream(file)) {
+            byte[] buffer = new byte[1024 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                crc.update(buffer, 0, read);
             }
-
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                if (!file.getFileName().toString().equals(fileToKeep)) {
-                    Files.deleteIfExists(file);
-                }
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
-            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
-                if (exc != null) throw exc;
-                if (!dir.equals(root) && !dir.getFileName().toString().equals(fileToKeep)) {
-                    Files.deleteIfExists(dir);
-                }
-                return FileVisitResult.CONTINUE;
-            }
-        });
+        }
+        return crc.getValue();
     }
-
 
 }
