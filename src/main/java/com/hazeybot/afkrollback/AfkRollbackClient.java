@@ -16,20 +16,25 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 
 public final class AfkRollbackClient implements ClientModInitializer {
     public static final String MOD_ID = "oneworldrollback";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
-    private static final String CHECKPOINT_DIR = "checkpoint";
-    private static final String CHECKPOINT_TEMP_DIR = "checkpoint.tmp";
-    private static final String CHECKPOINT_TIMESTAMP_FILE = "checkpoint.timestamp";
+    private static final String CHECKPOINT_FILE = "checkpoint.zip";
+    private static final String CHECKPOINT_TEMP_FILE = "checkpoint.zip.tmp";
 
     private static final KeyMapping.Category CHECKPOINT_CATEGORY = KeyMapping.Category.register(
             Identifier.fromNamespaceAndPath(MOD_ID, "checkpoint")
@@ -118,8 +123,8 @@ public final class AfkRollbackClient implements ClientModInitializer {
 
         try {
             Path world = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
-            Path checkpoint = world.resolve(CHECKPOINT_DIR).normalize();
-            Path checkpointTemp = world.resolve(CHECKPOINT_TEMP_DIR).normalize();
+            Path checkpoint = world.resolve(CHECKPOINT_FILE).normalize();
+            Path checkpointTemp = world.resolve(CHECKPOINT_TEMP_FILE).normalize();
             if (!checkpoint.startsWith(world) || !checkpointTemp.startsWith(world)) {
                 throw new IOException("Unsafe checkpoint path");
             }
@@ -132,17 +137,14 @@ public final class AfkRollbackClient implements ClientModInitializer {
                     LOGGER.info("Saving world before checkpoint...");
                     server.saveEverything(false, true, true);
 
-                    LOGGER.info("Copying world to checkpoint: {}", checkpoint);
-                    // The current checkpoint remains valid until the complete new
-                    // checkpoint has been copied. This matters for large worlds.
-                    deleteTree(checkpointTemp);
-                    copyTree(world, checkpointTemp, CHECKPOINT_DIR, CHECKPOINT_TEMP_DIR, CHECKPOINT_TIMESTAMP_FILE);
-                    Files.writeString(
-                            checkpointTemp.resolve(CHECKPOINT_TIMESTAMP_FILE),
-                            Long.toString(System.currentTimeMillis())
-                    );
-                    deleteTree(checkpoint);
-                    moveTree(checkpointTemp, checkpoint);
+                    LOGGER.info("Compressing world into checkpoint: {}", checkpoint);
+                    // Write a complete new ZIP first. The old checkpoint remains valid
+                    // until the new one has finished, which matters for large worlds.
+                    Files.deleteIfExists(checkpointTemp);
+                    zipWorld(world, checkpointTemp);
+                    Files.move(checkpointTemp, checkpoint, StandardCopyOption.REPLACE_EXISTING);
+                    // The ZIP's modified time is the checkpoint time used by the UI.
+                    Files.setLastModifiedTime(checkpoint, FileTime.fromMillis(System.currentTimeMillis()));
 
                     LOGGER.info("Checkpoint created successfully");
                     client.execute(() -> {
@@ -183,10 +185,10 @@ public final class AfkRollbackClient implements ClientModInitializer {
         if (server == null) return false;
         try {
             Path world = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
-            Path checkpoint = world.resolve(CHECKPOINT_DIR).normalize();
+            Path checkpoint = world.resolve(CHECKPOINT_FILE).normalize();
             return checkpoint.startsWith(world)
-                    && Files.isDirectory(checkpoint)
-                    && Files.exists(checkpoint.resolve("level.dat"));
+                    && Files.isRegularFile(checkpoint)
+                    && Files.size(checkpoint) > 0;
         } catch (Exception e) {
             return false;
         }
@@ -199,10 +201,10 @@ public final class AfkRollbackClient implements ClientModInitializer {
 
         try {
             Path world = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
-            Path timestampFile = world.resolve(CHECKPOINT_DIR).resolve(CHECKPOINT_TIMESTAMP_FILE);
-            if (!Files.exists(timestampFile)) return "Load Last Checkpoint";
+            Path checkpoint = world.resolve(CHECKPOINT_FILE).normalize();
+            if (!Files.isRegularFile(checkpoint)) return "Load Last Checkpoint";
 
-            long savedAt = Long.parseLong(Files.readString(timestampFile).trim());
+            long savedAt = Files.getLastModifiedTime(checkpoint).toMillis();
             long elapsedSeconds = Math.max(0L, (System.currentTimeMillis() - savedAt) / 1000L);
             long days = elapsedSeconds / 86400L;
             long hours = (elapsedSeconds % 86400L) / 3600L;
@@ -285,21 +287,21 @@ public final class AfkRollbackClient implements ClientModInitializer {
 
         Path saves = client.getLevelSource().getBaseDir().toAbsolutePath().normalize();
         Path world = saves.resolve(worldName).normalize();
-        Path checkpoint = world.resolve(CHECKPOINT_DIR).normalize();
+        Path checkpoint = world.resolve(CHECKPOINT_FILE).normalize();
 
         try {
             if (!world.startsWith(saves) || !checkpoint.startsWith(world)) {
                 throw new IOException("Unsafe world path");
             }
-            if (!Files.isDirectory(checkpoint) || !Files.exists(checkpoint.resolve("level.dat"))) {
+            if (!Files.isRegularFile(checkpoint) || Files.size(checkpoint) == 0) {
                 throw new IOException("No valid checkpoint exists");
             }
 
             LOGGER.info("Restoring checkpoint {} -> {}", checkpoint, world);
-            // Keep checkpoint in place. It is deliberately persistent and is only
-            // replaced when Shift+P creates a new checkpoint.
-            deleteTreeExcept(world, CHECKPOINT_DIR);
-            copyTree(checkpoint, world, CHECKPOINT_TIMESTAMP_FILE);
+            // Keep checkpoint.zip in place. It is deliberately persistent and is
+            // only replaced when a new checkpoint is created.
+            deleteTreeExcept(world, CHECKPOINT_FILE);
+            unzipWorld(checkpoint, world);
             LOGGER.info("Checkpoint restored successfully; checkpoint kept at {}", checkpoint);
 
             client.createWorldOpenFlows().openWorld(worldName, () -> {
@@ -315,38 +317,98 @@ public final class AfkRollbackClient implements ClientModInitializer {
         }
     }
 
-    private static void copyTree(Path source, Path target, String... ignoredNames) throws IOException {
-        java.util.Set<String> ignored = java.util.Set.of(ignoredNames);
-        Files.walkFileTree(source, new SimpleFileVisitor<>() {
-            @Override
-            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
-                Path relative = source.relativize(dir);
-                if (!relative.toString().isEmpty() && ignored.contains(relative.getFileName().toString())) {
-                    return FileVisitResult.SKIP_SUBTREE;
-                }
-                Files.createDirectories(target.resolve(relative));
-                return FileVisitResult.CONTINUE;
-            }
+    private static void zipWorld(Path world, Path zipFile) throws IOException {
+        try (OutputStream output = Files.newOutputStream(zipFile);
+             ZipOutputStream zip = new ZipOutputStream(output)) {
+            Files.walkFileTree(world, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+                    Path relative = world.relativize(dir);
+                    if (relative.toString().isEmpty()) return FileVisitResult.CONTINUE;
 
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                Path relative = source.relativize(file);
-                if (file.getFileName().toString().equals("session.lock")
-                        || ignored.contains(file.getFileName().toString())) {
+                    String name = relative.toString().replace(java.io.File.separatorChar, '/') + "/";
+                    if (name.equals(CHECKPOINT_FILE + "/") || name.equals(CHECKPOINT_TEMP_FILE + "/")) {
+                        return FileVisitResult.SKIP_SUBTREE;
+                    }
+
+                    zip.putNextEntry(new ZipEntry(name));
+                    zip.closeEntry();
                     return FileVisitResult.CONTINUE;
                 }
-                Files.copy(file, target.resolve(relative), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
-                return FileVisitResult.CONTINUE;
-            }
-        });
+
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                    String filename = file.getFileName().toString();
+                    if (filename.equals("session.lock")
+                            || filename.equals(CHECKPOINT_FILE)
+                            || filename.equals(CHECKPOINT_TEMP_FILE)) {
+                        return FileVisitResult.CONTINUE;
+                    }
+
+                    Path relative = world.relativize(file);
+                    ZipEntry entry = new ZipEntry(relative.toString().replace(java.io.File.separatorChar, '/'));
+
+                    // MCA region files already contain compressed chunk data, so
+                    // deflating them again wastes CPU. Store .mca files directly;
+                    // all other files continue to use normal ZIP compression.
+                    boolean isMca = filename.toLowerCase(java.util.Locale.ROOT).endsWith(".mca");
+                    if (isMca) {
+                        entry.setMethod(ZipEntry.STORED);
+                        entry.setSize(attrs.size());
+                        java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+                        try (InputStream input = Files.newInputStream(file)) {
+                            byte[] buffer = new byte[8192];
+                            int read;
+                            while ((read = input.read(buffer)) != -1) {
+                                crc.update(buffer, 0, read);
+                            }
+                        }
+                        entry.setCrc(crc.getValue());
+                    }
+
+                    zip.putNextEntry(entry);
+                    try (InputStream input = Files.newInputStream(file)) {
+                        input.transferTo(zip);
+                    }
+                    zip.closeEntry();
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        }
     }
 
-    private static void deleteTreeExcept(Path root, String directoryToKeep) throws IOException {
+    private static void unzipWorld(Path zipFile, Path world) throws IOException {
+        try (InputStream input = Files.newInputStream(zipFile);
+             ZipInputStream zip = new ZipInputStream(input)) {
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                Path target = world.resolve(entry.getName()).normalize();
+
+                // Prevent a crafted checkpoint.zip from writing outside the world.
+                if (!target.startsWith(world)) {
+                    throw new IOException("Unsafe path in checkpoint ZIP: " + entry.getName());
+                }
+
+                if (entry.isDirectory()) {
+                    Files.createDirectories(target);
+                } else {
+                    Path parent = target.getParent();
+                    if (parent != null) Files.createDirectories(parent);
+                    try (OutputStream output = Files.newOutputStream(target)) {
+                        zip.transferTo(output);
+                    }
+                }
+                zip.closeEntry();
+            }
+        }
+    }
+
+    private static void deleteTreeExcept(Path root, String fileToKeep) throws IOException {
         if (!Files.exists(root)) return;
         Files.walkFileTree(root, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
-                if (!dir.equals(root) && dir.getFileName().toString().equals(directoryToKeep)) {
+                if (!dir.equals(root) && dir.getFileName().toString().equals(fileToKeep)) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
                 return FileVisitResult.CONTINUE;
@@ -354,14 +416,16 @@ public final class AfkRollbackClient implements ClientModInitializer {
 
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                Files.deleteIfExists(file);
+                if (!file.getFileName().toString().equals(fileToKeep)) {
+                    Files.deleteIfExists(file);
+                }
                 return FileVisitResult.CONTINUE;
             }
 
             @Override
             public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
                 if (exc != null) throw exc;
-                if (!dir.equals(root) && !dir.getFileName().toString().equals(directoryToKeep)) {
+                if (!dir.equals(root) && !dir.getFileName().toString().equals(fileToKeep)) {
                     Files.deleteIfExists(dir);
                 }
                 return FileVisitResult.CONTINUE;
@@ -369,29 +433,5 @@ public final class AfkRollbackClient implements ClientModInitializer {
         });
     }
 
-    private static void moveTree(Path source, Path target) throws IOException {
-        try {
-            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
-        } catch (java.nio.file.AtomicMoveNotSupportedException e) {
-            Files.move(source, target);
-        }
-    }
 
-    private static void deleteTree(Path root) throws IOException {
-        if (!Files.exists(root)) return;
-        Files.walkFileTree(root, new SimpleFileVisitor<>() {
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                Files.deleteIfExists(file);
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
-            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
-                if (exc != null) throw exc;
-                Files.deleteIfExists(dir);
-                return FileVisitResult.CONTINUE;
-            }
-        });
-    }
 }
